@@ -168,7 +168,7 @@ def find_best_model(data, selected_columns, horizon, TRIALS):
                     elif forecasting_model=="GRU":
                         model.add(GRU(units=num_units, return_sequences=return_sequences))
                 model.add(Dense(1))
-                optimizer = keras.optimizers.Adam(lr=learning_rate)
+                optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
                 model.compile(loss='mean_squared_error', optimizer=optimizer)
                 model.fit(trainX, trainY, epochs=epochs, batch_size=batch_size, verbose=0)
                 validPredict = model.predict(validX, verbose=0)
@@ -371,7 +371,7 @@ def find_best_model(data, selected_columns, horizon, TRIALS):
                     elif forecasting_model=="GRU":
                         model.add(GRU(units=num_units, return_sequences=return_sequences))
                 model.add(Dense(horizon))
-                optimizer = keras.optimizers.Adam(lr=learning_rate)
+                optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
                 model.compile(loss='mean_squared_error', optimizer=optimizer)
                 model.fit(trainX, trainY, epochs=epochs, batch_size=batch_size, verbose=0)
                 validPredict = model.predict(validX, verbose=0)
@@ -595,7 +595,7 @@ def find_best_model(data, selected_columns, horizon, TRIALS):
                 elif best_params["forecasting_model"]=="GRU":
                     model.add(GRU(units=num_units, return_sequences=return_sequences))
             model.add(Dense(1))
-            optimizer = keras.optimizers.Adam(lr=learning_rate)
+            optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
             model.compile(loss='mean_squared_error', optimizer=optimizer)
 
             # Record the starting time to train the model
@@ -690,7 +690,7 @@ def find_best_model(data, selected_columns, horizon, TRIALS):
                 elif best_params["forecasting_model"]=="GRU":
                     model.add(GRU(units=num_units, return_sequences=return_sequences))
             model.add(Dense(horizon))
-            optimizer = keras.optimizers.Adam(lr=learning_rate)
+            optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
             model.compile(loss='mean_squared_error', optimizer=optimizer)
 
             # Record the starting time to train the model

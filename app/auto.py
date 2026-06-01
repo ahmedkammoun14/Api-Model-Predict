@@ -1,7 +1,7 @@
 from .auto_configure import *
 from .auto_predict import *
 import pathlib
-from typing import Optional
+from typing import Optional, List
 from fastapi import FastAPI, Query, FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import JSONResponse
 import os
@@ -12,12 +12,14 @@ import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 import asyncio
 
+
 RMSE_PATIENCE = 3
 RMSE_THRESHOLD = 0.8
 TRIALS = 3
 
 auto_app = FastAPI()
-
+from app.orchestrator_bridge import router as bridge_router
+auto_app.include_router(bridge_router)
 BASE_DIR = pathlib.Path(__file__).resolve().parent
 
 DATASET_DIR = BASE_DIR.parent / "dataset"
@@ -32,6 +34,10 @@ predictions = []
 prediction_index = 0
 rmse_table = []
 is_task_running = False
+
+class SequenceInput(BaseModel):
+    sequence: List[float]
+    horizon: int = 5
 
 async def find_and_retrain_model():
     global processed_dataset
@@ -198,3 +204,124 @@ async def update_constants(new_rmse_patience: int, new_rmse_threshold: float, ne
     RMSE_THRESHOLD = new_rmse_threshold
     TRIALS = new_trials
     return {"message": "Constants updated successfully", "RMSE_PATIENCE": RMSE_PATIENCE, "RMSE_THRESHOLD": RMSE_THRESHOLD, "TRIALS": TRIALS}
+
+
+@auto_app.get("/hyperparameters")
+async def get_hyperparameters():
+    """
+    Description: Expose active model hyperparameters and window size.
+    Returns: JSON containing the model status, type, window size, and other relevant info.
+    """
+    global hyperparameters, model, selected_horizon, selected_columns
+    
+    if hyperparameters is None or model is None:
+        return JSONResponse(
+            content={"status": "not_ready", "message": "Model not trained yet. Call /main first."},
+            status_code=200
+        )
+    
+    if hyperparameters['forecasting_model'] in ["RNN", "LSTM", "GRU", "ESN"]:
+        window_size = hyperparameters['look_back']
+    else:
+        window_size = hyperparameters['window_length']
+        
+    return {
+        "status": "ready",
+        "forecasting_model": hyperparameters['forecasting_model'],
+        "window_size": window_size,
+        "horizon": selected_horizon,
+        "column": selected_columns[0] if selected_columns else None
+    }
+
+
+@auto_app.post("/predict_sequence")
+async def predict_sequence(input_data: SequenceInput):
+    """
+    Description: Stateless prediction for a provided sequence.
+    Parameters:
+        input_data: SequenceInput object containing the sequence and desired horizon.
+    Response: JSON containing predictions and confidence intervals.
+    """
+    global model, hyperparameters, selected_horizon, predictions, prediction_index, rmse_table
+    
+    if model is None or hyperparameters is None:
+        raise HTTPException(status_code=400, detail="Model not trained. Call /main first.")
+    
+    if hyperparameters['forecasting_model'] in ["RNN", "LSTM", "GRU", "ESN"]:
+        window_size = hyperparameters['look_back']
+    else:
+        window_size = hyperparameters['window_length']
+        
+    if len(input_data.sequence) != window_size:
+        raise HTTPException(status_code=400, detail=f"Expected sequence length {window_size}, got {len(input_data.sequence)}")
+        
+    if input_data.horizon <= 0:
+        raise HTTPException(status_code=400, detail="horizon must be > 0")
+        
+    try:
+        # Prediction logic (Stateless)
+        sequence_np = np.array(input_data.sequence)
+        predictions_raw = auto_forecast(model, sequence_np, input_data.horizon, hyperparameters)
+        
+        # Flatten predictions according to the returned structure
+        if isinstance(predictions_raw, np.ndarray):
+            flat = predictions_raw.flatten().tolist()
+        elif isinstance(predictions_raw, list):
+            flat = []
+            for item in predictions_raw:
+                if isinstance(item, (list, np.ndarray)):
+                    flat.extend(np.array(item).flatten().tolist())
+                else:
+                    flat.append(float(item))
+        else:
+            flat = [float(predictions_raw)]
+            
+        pred_values = flat[:input_data.horizon]
+        
+        # Confidence Interval calculation
+        if len(rmse_table) >= 3:
+            sigma = np.std(rmse_table)
+        else:
+            sigma = abs(np.mean(pred_values)) * 0.1
+            
+        z = 1.96
+        confidence_low = [p - z * sigma for p in pred_values]
+        confidence_high = [p + z * sigma for p in pred_values]
+        
+        # Global state update (for re-training logic maintenance)
+        # Note: We strictly follow the instruction to append pred_values[0]
+        predictions.append(pred_values[0])
+        
+        if len(predictions) >= selected_horizon + 1:
+            # Use the end of the provided sequence as ground truth for comparison
+            actuals = np.array(input_data.sequence[-selected_horizon:])
+            # Handle potential length mismatch if window_size < selected_horizon
+            pred_to_compare = predictions[prediction_index]
+            
+            # Ensure we are comparing same lengths for mean_squared_error
+            if isinstance(pred_to_compare, (list, np.ndarray)) and len(actuals) == len(pred_to_compare):
+                rmse = np.sqrt(mean_squared_error(actuals, pred_to_compare))
+                rmse_table.append(rmse)
+                prediction_index += 1
+            elif not isinstance(pred_to_compare, (list, np.ndarray)) and len(actuals) == 1:
+                rmse = np.sqrt(mean_squared_error(actuals, [pred_to_compare]))
+                rmse_table.append(rmse)
+                prediction_index += 1
+            else:
+                # If we can't calculate RMSE due to format mismatch, we still increment to avoid stuck index
+                prediction_index += 1
+
+        # Trigger retraining check asynchronously
+        asyncio.create_task(check_and_retrain_model())
+        
+        return {
+            "predictions": pred_values,
+            "confidence_low": confidence_low,
+            "confidence_high": confidence_high,
+            "model": hyperparameters['forecasting_model'],
+            "window_size": window_size,
+            "horizon": input_data.horizon
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
